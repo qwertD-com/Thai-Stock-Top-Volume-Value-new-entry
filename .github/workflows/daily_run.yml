@@ -1,9 +1,12 @@
+final_workflow_yaml = """
 name: Thai Stock Daily Automation
 
 on:
   schedule:
     - cron: '0 11 * * 1-5' # 6:00 PM Bangkok Time, Mon-Fri
-  workflow_dispatch:
+  workflow_dispatch:    # Allows manual trigger from GitHub UI
+  repository_dispatch:  # Allows trigger from Google Sheets Reset button
+    types: [manual_reset_trigger]
 
 jobs:
   build:
@@ -20,3 +23,7 @@ jobs:
         env:
           GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
         run: python main.py
+"""
+
+print("--- Copy this into .github/workflows/daily_run.yml ---")
+print(final_workflow_yaml.strip())
