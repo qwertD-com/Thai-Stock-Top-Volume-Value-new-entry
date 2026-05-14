@@ -1,4 +1,4 @@
-final_workflow_yaml = """
+
 name: Thai Stock Daily Automation
 
 on:
