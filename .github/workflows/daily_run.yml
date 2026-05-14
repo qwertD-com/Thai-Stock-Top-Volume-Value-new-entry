@@ -1,4 +1,3 @@
-
 name: Thai Stock Daily Automation
 
 on:
@@ -23,7 +22,3 @@ jobs:
         env:
           GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
         run: python main.py
-"""
-
-print("--- Copy this into .github/workflows/daily_run.yml ---")
-print(final_workflow_yaml.strip())
