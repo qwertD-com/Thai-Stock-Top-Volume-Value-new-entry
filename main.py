@@ -4,6 +4,7 @@ import pandas as pd
 import yfinance as yf
 import gspread
 from datetime import datetime, timedelta
+from collections import Counter
 from google.oauth2.service_account import Credentials
 
 # --- CONFIGURATION ---
@@ -24,75 +25,100 @@ def get_gspread_client():
         creds, _ = default()
         return gspread.authorize(creds)
 
-def force_sync(sh, name, data):
-    df = pd.DataFrame(data)
+def force_update_sheet(sh, name, data_list, headers):
+    if not data_list:
+        print(f'Skipping {name}: No data.')
+        return
     try:
         ws = sh.worksheet(name)
         ws.clear()
-    except:
+    except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=name, rows='100', cols='20')
-    ws.update([df.columns.values.tolist()] + df.values.tolist(), 'A1')
-    print(f'Synced {name} with {len(df)} rows.')
+
+    ws.update([headers] + data_list, 'A1')
+    print(f"✅ Worksheet '{name}' updated with {len(data_list)} rows.")
 
 def main():
     print(f'Update started at {datetime.now()}')
 
-    # 1. Load Tickers
-    df_set = pd.read_html(MASTER_FILE, header=1)[0]
-    tickers = [str(s).strip() + '.BK' for s in df_set['Symbol'] if str(s).strip() and str(s) != 'nan']
+    if not os.path.exists(MASTER_FILE):
+        print(f"Error: {MASTER_FILE} not found.")
+        return
 
-    # 2. Fetch Data (40-day window to ensure 15 trading days)
-    end = datetime.now() + timedelta(days=1)
-    start = end - timedelta(days=40)
-    data = yf.download(tickers, start=start, end=end, group_by='ticker', progress=False, auto_adjust=True)
+    df_set = pd.read_html(MASTER_FILE, header=1)[0]
+    all_thai_tickers = [str(symbol).strip() + '.BK' for symbol in df_set['Symbol'] if str(symbol).strip() and str(symbol) != 'nan']
+
+    # 2. Fetch Market Data (45 days to guarantee 15 trading days)
+    end_date = datetime.now() + timedelta(days=1)
+    start_date = end_date - timedelta(days=45)
+    data_raw = yf.download(all_thai_tickers, start=start_date, end=end_date, group_by='ticker', progress=False, auto_adjust=True)
 
     # 3. Analyze Dates
-    dates = pd.Index(sorted(data.index.unique()))
-    today = dates[-1]
+    available_dates = pd.Index(sorted(data_raw.index.unique()))
+    today = available_dates[-1]
     today_str = today.strftime('%Y-%m-%d')
-    hist_dates = dates[max(0, dates.get_loc(today)-15) : dates.get_loc(today)]
+    idx = available_dates.get_loc(today)
+    historical_window = available_dates[max(0, idx-15) : idx]
 
     def get_top_20(target_date, mode='volume'):
         stats = []
-        for t in tickers:
+        for t in all_thai_tickers:
             try:
-                t_df = data[t]
-                if target_date in t_df.index:
-                    v, c = float(t_df.loc[target_date, 'Volume']), float(t_df.loc[target_date, 'Close'])
-                    if v > 0:
-                        m = v if mode == 'volume' else v * c
-                        stats.append({'Ticker': t, 'Vol': v, 'Price': c, 'Metric': m})
+                ticker_df = data_raw[t]
+                if target_date in ticker_df.index:
+                    vol = float(ticker_df.loc[target_date, 'Volume'])
+                    close = float(ticker_df.loc[target_date, 'Close'])
+                    if vol > 0:
+                        metric = vol if mode == 'volume' else vol * close
+                        stats.append({'Ticker': t, 'Metric': metric, 'Price': round(close, 2), 'Vol': int(vol)})
             except: continue
-        return pd.DataFrame(stats).sort_values('Metric', ascending=False).head(20) if not pd.DataFrame(stats).empty else pd.DataFrame()
+        if not stats: return pd.DataFrame(columns=['Ticker', 'Metric', 'Price', 'Vol'])
+        return pd.DataFrame(stats).sort_values(by='Metric', ascending=False).head(20)
 
-    # 4. Build Persistence Pools
-    hist_vol_pool = set()
-    hist_val_pool = set()
-    for d in hist_dates:
+    # 4. Build Historical Persistence Maps
+    hist_vol_counts = Counter()
+    hist_val_counts = Counter()
+
+    for d in historical_window:
         v_top = get_top_20(d, 'volume')
-        if not v_top.empty: hist_vol_pool.update(v_top['Ticker'].tolist())
+        if not v_top.empty: hist_vol_counts.update(v_top['Ticker'].tolist())
         a_top = get_top_20(d, 'value')
-        if not a_top.empty: hist_val_pool.update(a_top['Ticker'].tolist())
+        if not a_top.empty: hist_val_counts.update(a_top['Ticker'].tolist())
 
-    # 5. Build Reports
-    vol_raw = get_top_20(today, 'volume')
-    vol_final = [{'Date': today_str, 'Rank': i+1, 'Ticker': r['Ticker'], 'Volume': int(r['Vol']),
-                  'Value_MB': round((r['Vol']*r['Price'])/1e6, 2), 
-                  'Status': 'NEW ENTRY' if r['Ticker'] not in hist_vol_pool else ''}
-                 for i, r in vol_raw.reset_index().iterrows()]
+    # 5. Build Reports following Columns A-G
+    headers = ['Date', 'Ticker', 'Price', 'Volume', 'Values_MB', 'Days_in_Top_20_Prev_15D', 'Status']
 
-    val_raw = get_top_20(today, 'value')
-    val_final = [{'Date': today_str, 'Rank': i+1, 'Ticker': r['Ticker'], 'Price': r['Price'],
-                  'Value_MB': round(r['Metric']/1e6, 2), 
-                  'Status': 'NEW ENTRY' if r['Ticker'] not in hist_val_pool else ''}
-                 for i, r in val_raw.reset_index().iterrows()]
+    # Volume Report
+    vol_df = get_top_20(today, 'volume')
+    vol_data = []
+    for _, r in vol_df.iterrows():
+        count = hist_vol_counts.get(r['Ticker'], 0)
+        vol_data.append([
+            today_str, r['Ticker'], r['Price'], r['Vol'],
+            round((r['Vol']*r['Price'])/1e6, 2), count,
+            'YES' if count == 0 else 'NO'
+        ])
+
+    # Value Report
+    val_df = get_top_20(today, 'value')
+    val_data = []
+    for _, r in val_df.iterrows():
+        count = hist_val_counts.get(r['Ticker'], 0)
+        val_data.append([
+            today_str, r['Ticker'], r['Price'], r['Vol'],
+            round(r['Metric']/1e6, 2), count,
+            'YES' if count == 0 else 'NO'
+        ])
 
     # 6. Sync to Google Sheets
-    gc = get_gspread_client()
-    sh = gc.open(SHEET_NAME)
-    force_sync(sh, 'Volume Ranking', vol_final)
-    force_sync(sh, 'Value Analysis', val_final)
-    print(f'✅ Successfully synced: {today_str}')
+    try:
+        gc = get_gspread_client()
+        sh = gc.open(SHEET_NAME)
+        force_update_sheet(sh, 'Volume Ranking', vol_data, headers)
+        force_update_sheet(sh, 'Value Analysis', val_data, headers)
+        print(f"🚀 Successfully synced: {today_str}")
+    except Exception as e:
+        print(f"❌ Sync failed: {e}")
 
 if __name__ == '__main__':
     main()
