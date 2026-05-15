@@ -4,7 +4,7 @@ on:
   schedule:
     - cron: '0 11 * * 1-5' # 6:00 PM Bangkok Time, Mon-Fri
   workflow_dispatch:    # Allows manual trigger from GitHub UI
-  repository_dispatch:  # Allows trigger from Google Sheets Reset button
+  repository_dispatch:  # Allows trigger from Google Sheets button
     types: [manual_reset_trigger]
 
 jobs:
@@ -18,10 +18,8 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Download Latest Master Ticker List
-        run: |
-          # Using the verified direct weblink URL
-          wget -O listedCompanies_en_US.xls https://weblink.set.or.th/dat/rtd/listedCompanies_en_US.xls
+      # Note: No 'wget' step here because the SET website blocks robots.
+      # Ensure 'listedCompanies_en_US.xls' is uploaded to your repo root.
 
       - name: Install dependencies
         run: pip install yfinance pandas gspread google-auth lxml xlrd
